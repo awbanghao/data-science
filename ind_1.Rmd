@@ -1,0 +1,1812 @@
+---
+title: "Does alcohol consumption moderate the relationship between age, social engagement and the probability of dementia?"
+author: "Timothy"
+date: "`r Sys.Date()`"
+
+abstract: "Dementia is a highly prevalent neurocognitive disorder with significant public health implications. This study examined whether alcohol consumption moderates the effects of age and social engagement on dementia risk using data from the National Social Life, Health, and Ageing Project (NSHAP). Logistic and regularised regression models found no evidence of interactions between alcohol use and either age or social engagement in predicting dementia status. However, results from the decision tree and random forest model suggest that alcohol consumption may weaken the relationship between higher ages and increased dementia risk. However, no evidence was found that alcohol consumption weakens the protectivee relationship between higher social engagement and lower dementia risk."
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cerulean
+    code_folding: show
+  editor_options:
+    chunk_output_type: inline
+---
+
+# Motivation
+
+
+## Background
+**Dementia** is a prevalent neurocognitive disorder with major public health implications (Aw et al., 2025). Identifying modifiable risk factors that can serve as intervention targets is crucial for advancing models of resilience and cognitive reserve in ageing.
+
+The **neuroprotection hypothesis** proposes that alcohol consumption may buffer age-related neurodegenerative processes (Rehm et al., 2019). For instance, moderate alcohol intake has been associated with increased high-density lipoprotein cholesterol levels and reduced circulating inflammatory markers such as fibrinogen, both of which are relevant to age-related mechanisms underlying dementia. 
+
+Conversely, the **social impairment** hypothesis posits that alcohol use may diminish the quality of social interactions (Kim et al., 2018). Since higher social engagement is a well-established protective factor against dementia, it is important to determine whether alcohol consumption attenuates this beneficial association.
+
+## Aim
+This study examines whether alcohol consumption moderates the relationships of age and social engagement with dementia risk.
+
+
+## Hypotheses
+**H1**: Alcohol consumption moderates the association between age and dementia classification, such that higher alcohol consumption weakens the relationship between older age and increased dementia probability.
+
+**H2**: Alcohol consumption moderates the association between social engagement and dementia classification, such that higher alcohol consumption weakens the relationship between higher social engagement and lower dementia probability.
+
+
+# Settings
+Chunk options were set.
+```{r}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  error     = FALSE,
+  fig.width = 14,
+  fig.height = 7,
+  out.width = "100%")
+```
+
+
+# Setup
+
+
+## Environment
+Environment was cleaned, and outputs were cleared. The seed is set here.
+```{r}
+rm(list = ls(all.names = TRUE)) # remove objects
+cat("\014")                     # clear
+seed <- 4245
+options(scipen = 999)
+```
+
+
+## Packages
+Libraries were loaded.
+```{r}
+packages <- c(
+  "conflicted",
+  "lmtest",
+  "sjPlot",
+  "vip",
+  "rpart",
+  "rpart.plot",
+  "car",
+  "readxl",
+  "smotefamily",
+  "fastshap",
+  "shapviz",
+  "hstats",
+  "pdp",
+  "gbm",
+  "rstatix",
+  "pROC",
+  "ggcorrplot",
+  "missRanger",
+  "glmnet",
+  "openxlsx",
+  "gridExtra",
+  "psych",
+  "Hmisc",
+  "scales",
+  "reshape2",
+  "purrr",
+  "tibble",
+  "rmarkdown",
+  "knitr",
+  "tidyverse",
+  "caret",
+  "dplyr")
+
+invisible(lapply(
+  packages,
+  \(p) {
+    if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+    library(p, character.only = TRUE)}))
+```
+
+
+## Functions
+Functions were deconflicted with conflict_prefer() from the **conflicted** package (Wickham, 2024).
+```{r, message = FALSE, warning = FALSE}
+conflict_scout()
+
+functions <- c(
+  filter = "dplyr",
+  lag = "dplyr",
+  combine = "dplyr",
+  recode = "dplyr",
+  select = "dplyr",
+  alpha = "ggplot2",
+  partial = "pdp",
+  describe = "psych",
+  summarize = "dplyr",
+  cbind = "base",
+  t_test = "rstatix")
+
+invisible(lapply(names(functions), function(f) conflict_prefer(f, functions[f])))
+```
+
+
+# Data Cleaning
+
+
+## Dataset
+The raw dataset is accessible at: https://osf.io/7xcmy/files/f68nh.
+
+The codebook is accessible at: https://www.icpsr.umich.edu/web/NAHDAP/series/706/variables.
+
+
+## Import
+The raw dataset was imported with read_excel() from the **readxl** package (Wickham & Bryan, 2025).
+```{r, message = FALSE, warning = FALSE}
+df <- read_excel(
+  "File 4 - NSHAP WAVE 2 - Education and cancer.xlsx",
+  sheet = "34921-0001-Data",
+  skip = 10,
+  col_names = TRUE)
+```
+
+
+## Variables
+Variables were selected.
+```{r}
+df <- df %>%
+  select(dia = MOCA...17                       # outcome
+       , alc = DRNKWKLY                        # moderator
+       , job = HRSCJOB
+       , smk = AVECIG
+       , phy = PHYSACT2...12
+       , job = HRSCJOB
+       , soc = `SOCIALLY ACTIVE`               # main effect
+       
+       , sex = GENDER...44
+       , age = AGE                             # main effect
+       , mar = `NEVER MARRIED...16`
+       , edu = DEGREE_RECODE
+       , eth = RACE_RECODE...45
+       , inc = INCOME_1...930)
+
+df %>% describe() %>% paged_table()
+```
+
+
+## Observations
+Observations with missing or invalid values in the outcome (**dia**) were excluded case-wise. 
+
+Dementia status was classified according to established clinical cutoffs from the Montreal Cognitive Assessment (MoCA) scale (Carson et al., 2018).
+```{r}
+df <- df %>%
+  mutate(
+    dia = case_when(
+      dia > 0 & dia < 18.5 ~ "1",
+      dia >= 18.5 ~ "0",
+      TRUE ~ NA_character_)) %>%
+  filter(!is.na(dia), dia %in% c("0", "1"))
+
+df$dia %>% table()
+df %>% dim()
+```
+
+
+## Values
+Values were cleaned based on dataset documentation in the codebook.
+```{r}
+df$smk[df$smk == -3] <- 0
+df$job[df$job == -3] <- 0
+df$alc[df$alc == -3] <- 0
+
+na_rules <- list(mar = list(discrete = c(), range = list(c(0, 1)))
+               , smk = list(discrete = c(), range = list(c(0, Inf)))
+               , phy = list(discrete = c(-3), range = list(c(1, 5)))
+               , sex = list(discrete = c(0, -3, -2, -1), range = list(c(1, 2)))
+               , edu = list(discrete = c(0, -3, -2, -1, 7), range = list(c(1, 6)))
+               , eth = list(discrete = c(0, -3, -2, -1), range = list(c(1, 3)))
+               , inc = list(discrete = c(-5, -4, -2, -1), range = list(c(1, 5)))
+               , age = list(discrete = c(0, -8, -6, -5, -4, -3, -2, -1), range = list(c(61, Inf)))
+               , alc = list(discrete = c(-8, -3, -2, -1), range = list(c(0, 7)))
+               , job = list(discrete = c(-8, -6, -5, -4, -3, -2, -1), range = list(c(0, Inf)))
+               , soc = list(discrete = c(0), range = list(c(6, 32)))
+               , dia = list(discrete = c(-1), range = list(c(0, 1))))
+
+vars <- names(na_rules)
+
+convert_to_na <- function(x, discrete_vals, ranges) {
+  is_na <- x %in% discrete_vals
+  for (r in ranges) is_na <- is_na | (x < r[1] | x > r[2])
+  x[is_na] <- NA
+  x}
+
+df[vars] <- lapply(vars, \(v) convert_to_na(df[[v]], na_rules[[v]]$discrete, na_rules[[v]]$range))
+
+df %>% describe() %>% paged_table()
+```
+
+
+## Missing
+Missing values were identified and tallied.
+```{r}
+colSums(is.na(df))
+
+inval0 <- c("age") # a value of 0 would not be valid in these variables
+
+sapply(df[inval0], function(x) sum(x == 0, na.rm = TRUE))
+
+missing <- round(sum(is.na(df)) / prod(dim(df)) * 100, 2)
+
+print(paste("Percentage of data missing:", missing, "%"))
+```
+
+
+## Factors
+Categorical variables were factorised and reference categories were defined.
+```{r}
+df$sex <- factor(recode(as.character(df$sex), 
+                        `1` = "Male", 
+                        `2` = "Female")) %>% relevel(ref = "Male")
+
+df$eth <- factor(recode(as.character(df$eth), 
+                        `1` = "White", 
+                        `1.29` = "Non-White",
+                        `2` = "Non-White",
+                        `3` = "Non-White")) %>% relevel(ref = "White")
+
+df$mar <- factor(recode(as.character(df$mar), 
+                       `0` = "Married", 
+                       `1` = "NeverMarried")) %>% relevel(ref = "Married")
+
+df$dia <- factor(recode(as.character(df$dia),
+                        `0` = "Nondemented", 
+                        `1` = "Demented")) %>% relevel(ref = "Nondemented")
+
+df %>% describe() %>% paged_table()
+```
+
+
+# Data Exploration
+
+
+## Variables
+Variables were sorted into continuous, ordinal, and categorical variables. 
+```{r}
+group <- "dia"
+ordvars <- c("phy", "edu", "inc")
+numvars <- setdiff(names(df)[sapply(df, is.numeric)], c(group, ordvars))
+catvars <- setdiff(names(df)[sapply(df, is.factor) & !sapply(df, is.ordered)], group)
+```
+
+
+## Distributions
+Distributions of each predictor by dementia status are visualised.
+
+No obvious class separation was observed for any variable.
+
+The number of cigarettes per day (**smk**), number of days per week alcohol is consumed (**alc**), and job hours per week (**job**) were transformed into nominal categories representing presence or absence. 
+```{r}
+df_num_long <- df %>%
+  select(all_of(c(group, numvars))) %>%
+  pivot_longer(cols = all_of(numvars), names_to = "variable", values_to = "value") %>%
+  filter(!is.na(value))
+
+for (v in unique(df_num_long$variable)) {
+  dfnona <- subset(df_num_long, variable == v & !is.na(value))
+  p <- ggplot(dfnona, aes(x = value, fill = .data[[group]])) +
+    geom_density(alpha = 0.4) +
+    theme_minimal() +
+    labs(title = paste("Density of", v), subtitle = paste("Grouped by", group), x = v, y = "Density")
+  print(p)}
+
+for (v in ordvars) {
+  dfnona <- df %>%
+    filter(!is.na(.data[[v]]), !is.na(.data[[group]])) %>%
+    mutate(ord_var = factor(.data[[v]], levels = sort(unique(.data[[v]])), ordered = TRUE))
+  p <- ggplot(dfnona, aes(x = ord_var, fill = .data[[group]])) +
+    geom_bar(position = "dodge", color = "black", width = 0.6) +
+    theme_minimal() +
+    labs(title = paste("Count of", group, "by", v), x = v, y = "Count")
+  print(p)}
+
+for (v in catvars) {
+  dfnona <- df %>%
+    filter(!is.na(.data[[v]]), !is.na(.data[[group]])) %>%
+    group_by(across(all_of(c(v, group)))) %>%
+    summarize(n = n(), .groups = "drop") %>%
+    group_by(across(all_of(v))) %>%
+    mutate(prop = n / sum(n)) %>%
+    ungroup()
+  p <- ggplot(dfnona, aes(x = .data[[v]], y = prop, fill = .data[[group]])) +
+    geom_col(position = "fill", color = "black", width = 0.3) +
+    theme_minimal() +
+    labs(title = paste("Proportion of", group, "by", v), x = v, y = "Proportion")
+  print(p)}
+```
+
+
+## Discretisation
+The distributions of the transformed variables are shown here.
+
+The characteristics of the overall sample, and subsets split by dementia status, are displayed.
+```{r}
+df$job <- factor(recode(as.character(ifelse(df$job == 0, 0, 1)), `0` = "No.Job", `1` = "Have.Job")) %>% relevel(ref = "No.Job")
+df$smk <- factor(recode(as.character(ifelse(df$smk == 0, 0, 1)), `0` = "No.Smoke", `1` = "Have.Smoke")) %>% relevel(ref = "No.Smoke")
+df$alc <- factor(recode(as.character(ifelse(df$alc == 0, 0, 1)), `0` = "No.Alcohol", `1` = "Have.Alcohol")) %>% relevel(ref = "No.Alcohol")
+
+numvars <- setdiff(names(df)[sapply(df, is.numeric)], group)
+numvars <- setdiff(numvars, ordvars)
+catvars <- setdiff(names(df)[sapply(df, is.factor) & !sapply(df, is.ordered)], group)
+
+for (v in catvars) {
+  dfnona <- df %>%
+    filter(!is.na(.data[[v]]), !is.na(.data[[group]])) %>%
+    group_by(across(all_of(c(v, group)))) %>%
+    summarize(n = n(), .groups = "drop") %>%
+    group_by(across(all_of(v))) %>%
+    mutate(prop = n / sum(n)) %>%
+    ungroup()
+  
+  p <- ggplot(dfnona, aes(x = .data[[v]], y = prop, fill = .data[[group]])) +
+    geom_col(position = "fill", color = "black", width = 0.3) +
+    theme_minimal() +
+    labs(title = paste("Proportion of", group, "by", v), x = v, y = "Proportion")
+  
+  print(p)}
+
+df %>% describe() %>% paged_table()
+df %>% filter(dia == "Nondemented") %>% describe() %>% paged_table()
+df %>% filter(dia == "Demented") %>% describe() %>% paged_table()
+
+table(df$dia, df$sex)
+table(df$dia, df$eth)
+table(df$dia, df$mar)
+table(df$dia, df$alc)
+table(df$dia, df$job)
+table(df$dia, df$smk)
+```
+
+
+## Differences
+Differences by dementia status were assessed. 
+
+Levene's tests, independent-samples t-tests, and Wilcoxon tests were run using the **rstatix** package (Kassambara, 2023). Chi-square tests for categorical variables were run.
+
+*If the p-values are not visible in the table, use the navigation arrows in the top-right of each paged table.*
+```{r}
+levene_results <- map_dfr(numvars, ~ {
+  df %>%
+    filter(!is.na(.data[[.x]]), !is.na(.data[[group]])) %>%
+    levene_test(as.formula(paste(.x, "~", group))) %>%
+    mutate(variable = .x)})
+
+unequalnumvars <- levene_results %>%
+  filter(p < 0.05) %>%
+  pull(variable) # var.equal = FALSE
+
+equalnumvars <- setdiff(numvars, unequalnumvars) # var.equal = TRUE
+
+ttest_equal_results <- df %>%
+  pivot_longer(
+    cols = all_of(equalnumvars),
+    names_to = "variable",
+    values_to = "value") %>%
+  filter(!is.na(value), !is.na(.data[[group]])) %>%
+  group_by(variable) %>%
+  t_test(as.formula(paste("value ~", group)), var.equal = TRUE) %>%
+  ungroup()
+
+ttest_unequal_results <- map_dfr(unequalnumvars, ~ {
+  df %>%
+    filter(!is.na(.data[[.x]]), !is.na(.data[[group]])) %>%
+    t_test(as.formula(paste(.x, "~", group)), var.equal = FALSE) %>%
+    mutate(variable = .x)})
+
+wilcox_results <- df %>%
+  pivot_longer(
+    cols = all_of(ordvars),
+    names_to = "variable",
+    values_to = "value") %>%
+  filter(!is.na(value), !is.na(.data[[group]])) %>%
+  group_by(variable) %>%
+  wilcox_test(as.formula(paste("value ~", group)), exact = FALSE) %>%
+  ungroup()
+
+chisq_results <- map_dfr(catvars, ~ {
+  tbl <- table(df[[.x]], df[[group]])
+  res <- chisq.test(tbl)
+  broom::tidy(res) %>%
+    mutate(variable = .x)})
+
+levene_results %>% select(variable, p) %>% paged_table()
+ttest_equal_results %>% select(variable, p) %>% paged_table()
+ttest_unequal_results %>% select(variable, p) %>% paged_table()
+wilcox_results %>% select(variable, p) %>% paged_table()
+chisq_results %>% select(variable, p.value) %>% rename(p = p.value) %>% paged_table()
+```
+
+
+## Correlations
+Spearman correlations between continuous and ordinal predictors were calculated with rcorr() from the **Hmisc** package (Harrell, 2019).
+```{r}
+corrvars <- c(ordvars, numvars)
+df_num <- df[, corrvars]
+cor_res <- rcorr(as.matrix(df_num), type = "spearman")
+cor_matrix <- cor_res$r
+p_matrix <- cor_res$P
+
+ggcorrplot(cor_matrix, 
+           hc.order = TRUE, 
+           type = "upper",
+           lab = TRUE, 
+           p.mat = p_matrix, 
+           sig.level = 0.05,
+           insig = "blank",
+           colors = c("violetred", "white", "steelblue"))
+```
+
+
+## Multicollinearity
+Variance inflation factors were computed with vif() from the **car** package (Fox & Weisberg, 2019). 
+```{r}
+vif(lm(as.numeric(dia) ~ ., data = df))
+```
+
+
+# Data Splits
+
+
+## Partitions
+The data was partitioned into train and test splits.
+```{r}
+set.seed(seed)
+train_indices <- createDataPartition(df[[group]], p = 4/5, list = FALSE)
+train <- df[train_indices, ]
+test <- df[-train_indices, ]
+```
+
+
+## Imputation
+Missing values in the train split were imputed with missRanger() from the **missRanger** package (Mayer & Mayer, 2019). 
+
+The imputation model was then used to predict values in the test split.
+
+One-hot encoding was performed with dummyVars() from the **caret** package (Kuhn, 2008).
+```{r, warning = FALSE, message = FALSE}
+test <- test %>%
+  filter(if_all(c(sex, edu, eth, age, soc), ~ !is.na(.)))
+
+set.seed(seed)
+predictor_vars <- setdiff(names(train), "dia")
+
+impute_model <- missRanger(
+  data = train[, predictor_vars],
+  formula = . ~ .,
+  num.trees = 500,
+  pmm.k = 10,
+  maxiter = 10,
+  keep_forests = TRUE,
+  seed = seed,
+  verbose = FALSE)
+
+imputed_train <- impute_model$data
+imputed_train$dia <- train$dia
+
+imputed_test <- predict(
+  impute_model,
+  newdata = test[, predictor_vars],
+  pmm.k = 10,
+  seed = seed)
+
+imputed_test$dia <- test$dia
+
+for (v in predictor_vars) {
+  if (is.factor(imputed_train[[v]])) {
+    levels(imputed_test[[v]]) <- levels(imputed_train[[v]])}}
+
+dv <- dummyVars(dia ~ ., data = imputed_train, fullRank = TRUE)
+train <- data.frame(predict(dv, newdata = imputed_train))
+train$dia <- imputed_train$dia
+
+test <- data.frame(predict(dv, newdata = imputed_test))
+test$dia <- imputed_test$dia
+```
+
+
+## Splits
+The characteristics of each split are displayed here.
+```{r}
+train %>% describe() %>% paged_table()
+test %>% describe() %>% paged_table()
+```
+
+
+# Model
+## Formula
+An additive model including the main predictors, and an interaction model incorporating the hypothesised interaction terms, were specified.
+```{r}
+group <- "dia"
+formula <- as.formula(paste(group, "~ ."))
+formula_plus <- as.formula(paste(group, "~ . + age*alc.Have.Alcohol + soc*alc.Have.Alcohol"))
+
+```
+
+
+# Train Control
+Class balancing was done with smote from the **DMwR** package, internally in the **caret** package (Kuhn, 2008).
+
+Model training will use k-fold cross-validation, with 10 folds in each cross-validation iteration, which will be repeated 5 times.
+```{r}
+train_control <- trainControl(method = "repeatedcv", 
+                              number = 10, 
+                              repeats = 5, 
+                              summaryFunction = twoClassSummary, 
+                              sampling = "smote",
+                              classProbs = TRUE)
+```
+
+
+# Logistic Regression
+
+
+## Training
+Logistic regression will be used as the baseline model. 
+
+Both the the simple additive model (**formula**) and interaction model (**formula_plus**) were trained.
+```{r, message = FALSE}
+# set.seed(seed)
+log_mod <- train(formula
+                 , data = train
+                 , method = "glm"
+                 , family = "binomial"
+                 , trControl = train_control
+                 , preProcess = c("center", "scale")
+                 , metric = "ROC")
+
+# set.seed(seed)
+log_mod_plus <- train(formula_plus
+                 , data = train
+                 , method = "glm"
+                 , family = "binomial"
+                 , trControl = train_control
+                 , preProcess = c("center", "scale")
+                 , metric = "ROC")
+```
+
+## Model Comparison
+Model comparison of the interaction model and simple additive model was computed with lrtest() from the **lmtest** package (Hothorn et al., 2015).
+
+Adding the interaction terms did not improve model significance, so the simpler additive model was retained.
+```{r}
+log_glm <- glm(formula, data = train, family = "binomial")
+log_plus_glm <- glm(formula_plus, data = train, family = "binomial")
+
+lrtest(log_glm, log_plus_glm)
+
+log_glm %>% AIC()
+log_plus_glm %>% AIC()
+```
+
+## Summary
+```{r}
+model <- log_mod
+
+summary(model)
+varImp(model)
+vip(model)  # age, soc, and alc.Have.Alcohol have appreciable importance.
+```
+
+
+## Predictions
+```{r}
+model <- log_mod$finalModel
+probs <- predict(log_mod, newdata = train, type = "prob")
+
+preds <- probs[, "Demented"]
+class <- factor(ifelse(preds < 0.5, "Nondemented", "Demented"))
+class %>% table()
+confusion <- confusionMatrix(class, train$dia, positive = "Demented")
+confusion %>% print()
+```
+
+
+# Regularised Regression
+
+
+## Training
+The default hyperparameter grid for regularised regression was used.
+
+Both the the simple additive model (**formula**) and interaction model (**formula_plus**) were trained.
+```{r}
+set.seed(seed)
+reg_mod_tune <- train(
+  formula,
+  data = train,
+  method = "glmnet",
+  trControl = train_control,
+  metric = "ROC",
+  family = "binomial",
+  preProcess = c("center", "scale"),
+  tuneLength = 10)
+
+set.seed(seed)
+reg_plus_mod_tune <- train(
+  formula_plus,
+  data = train,
+  method = "glmnet",
+  trControl = train_control,
+  metric = "ROC",
+  family = "binomial",
+  preProcess = c("center", "scale"),
+  tuneLength = 10)
+```
+
+
+## Simple Additive - Evaluation
+The default hyperparameter grid needs tuning. 
+
+The estimated standard error of the ROC metric at the bestTune (**avcvse**) was lower than the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**).
+
+Further hyperparameter tuning has the potential to yield improvements in model performance that exceed what would be expected from noise at the bestTune.
+```{r}
+model <- reg_mod_tune
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC at bestTune:", avcvse, "\n")
+cat("SD of ROC across tuning configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Simple Additive - Inspection
+Average ROC values across the range of tuning configurations were displayed.
+```{r}
+plot1 <- model$results %>%
+  ggplot(aes(x = alpha, y = ROC, color = lambda)) + 
+  geom_point(size = 6, alpha = 0.5) + 
+  scale_color_viridis_c() +
+  labs(title = "Regularised Regression: Average AUC by Alpha (α)", 
+       x = "Alpha (α)",
+       y = "Average Area under the Curve (AUC)",
+       color = "λ") + theme_minimal()
+
+lambda_new <- 0.015
+alpha_new <- NULL
+
+plot2 <- model$results %>%
+  filter(lambda <= lambda_new) %>%
+  ggplot(aes(x = alpha, y = ROC, color = lambda)) + 
+  geom_point(size = 6, alpha = 0.5) + 
+  scale_color_viridis_c(limits = c(0, 0.14)) +
+  labs(title = paste("If λ <=", lambda_new), 
+       x = "Alpha (α)",
+       y = "Average Area under the Curve (AUC)",
+       color = "λ") + theme_minimal()
+
+grid.arrange(plot1, plot2, ncol = 2)
+```
+
+
+## Simple Additive - Tuned Grid
+Lambda values were tuned (see above).
+```{r}
+cat(paste("Consider adjusting λ to less than", lambda_new))
+
+grid_reg <- expand.grid(
+  alpha = seq(0, 1, length.out = 10)
+  , lambda = seq(0, lambda_new, length.out = 10))
+```
+
+
+## Simple Additive - Retraining
+The model was retrained based on the new grid.
+```{r}
+reg_mod <- train(formula
+                 , data = train
+                 , method = "glmnet"
+                 , family = "binomial"
+                 , trControl = train_control
+                 , preProcess = c("center", "scale")
+                 , metric = "ROC"
+                 , tuneGrid = grid_reg)
+```
+
+
+## Simple Additive - Evaluation
+The new grid has reduced the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**) to bellow the estimated standard error of the ROC metric at the bestTune (**avcvse**).
+```{r}
+model <- reg_mod
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC across folds:", avcvse, "\n")
+cat("SD of ROC across hyperparameter configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Simple Additive - Stop tuning?
+The new grid has reduced the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**) to bellow the estimated standard error of the ROC metric at the bestTune (**avcvse**). So, further tuning is unlikely to yield improvements in model performance that exceed what would be expected from noise at the bestTune.
+
+
+So, no further tuning is necessary.
+
+
+## Interaction - Evaluation
+The default hyperparameter grid needs tuning. 
+
+The estimated standard error of the ROC metric at the bestTune (**avcvse**) was lower than the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**).
+
+Further hyperparameter tuning has the potential to yield improvements in model performance that exceed what would be expected from noise at the bestTune.
+```{r}
+model <- reg_plus_mod_tune
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC across folds:", avcvse, "\n")
+cat("SD of ROC across hyperparameter configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Interaction - Inspection
+Average ROC values across the range of tuning configurations were displayed.
+```{r}
+plot1 <- model$results %>%
+  ggplot(aes(x = alpha, y = ROC, color = lambda)) + 
+  geom_point(size = 6, alpha = 0.5) + 
+  scale_color_viridis_c() +
+  labs(title = "Regularised Regression: Average AUC by Alpha (α)", 
+       x = "Alpha (α)",
+       y = "Average Area under the Curve (AUC)",
+       color = "λ") + theme_minimal()
+
+lambda_new <- 0.015
+alpha_new <- NULL
+
+plot2 <- model$results %>%
+  filter(lambda <= lambda_new) %>%
+  ggplot(aes(x = alpha, y = ROC, color = lambda)) + 
+  geom_point(size = 6, alpha = 0.5) + 
+  scale_color_viridis_c(limits = c(0, 0.14)) +
+  labs(title = paste("If λ <=", lambda_new), 
+       x = "Alpha (α)",
+       y = "Average Area under the Curve (AUC)",
+       color = "λ") + theme_minimal()
+
+grid.arrange(plot1, plot2, ncol = 2)
+```
+
+
+## Interaction - Tuned Grid
+Lambda values were tuned (see above).
+```{r}
+cat(paste("Consider adjusting λ to less than", lambda_new))
+
+grid_reg <- expand.grid(
+  alpha = seq(0, 1, length.out = 10)
+  , lambda = seq(0, lambda_new, length.out = 10))
+```
+
+
+## Interaction - Retraining
+The model was retrained based on the new grid.
+```{r}
+reg_plus_mod <- train(formula
+                 , data = train
+                 , method = "glmnet"
+                 , family = "binomial"
+                 , trControl = train_control
+                 , preProcess = c("center", "scale")
+                 , metric = "ROC"
+                 , tuneGrid = grid_reg)
+```
+
+
+## Interaction - Evaluation
+The new grid has reduced the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**) to bellow the estimated standard error of the ROC metric at the bestTune (**avcvse**).
+```{r}
+model <- reg_plus_mod
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC at bestTune:", avcvse, "\n")
+cat("SD of ROC across tuning configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Interaction - Stop tuning?
+The new grid has reduced the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**) to bellow the estimated standard error of the ROC metric at the bestTune (**avcvse**).
+
+So, no further tuning is necessary.
+
+
+## Model Comparison
+Comparing the simple additive and interaction model, both models performed comparably. Adding the interaction terms did not improve model significance, so the simpler additive model was retained.
+```{r}
+model <- reg_mod
+probs <- predict(model, newdata = train, type = "prob")
+preds <- probs[, "Demented"]
+class <- factor(ifelse(preds < 0.5, "Nondemented", "Demented"))
+class %>% table()
+confusion <- confusionMatrix(class, train$dia, positive = "Demented")
+confusion %>% print()
+
+model <- reg_plus_mod
+probs <- predict(model, newdata = train, type = "prob")
+preds <- probs[, "Demented"]
+class <- factor(ifelse(preds < 0.5, "Nondemented", "Demented"))
+class %>% table()
+confusion <- confusionMatrix(class, train$dia, positive = "Demented")
+confusion %>% print()
+```
+
+## Simple Additive - Summary
+```{r}
+model <- reg_mod
+
+summary(model)
+varImp(model)
+vip(model) # age, soc, and alc.Have.Alcohol have appreciable importance.
+```
+
+
+## Simple Additive - Predictions
+Accuracy of the regularised regression model (**reg_mod**).
+```{r}
+model <- reg_mod
+probs <- predict(model, newdata = train, type = "prob")
+preds <- probs[, "Demented"]
+class <- factor(ifelse(preds < 0.5, "Nondemented", "Demented"))
+class %>% table()
+confusion <- confusionMatrix(class, train$dia, positive = "Demented")
+confusion %>% print()
+```
+
+
+# Decision Trees
+
+
+## Training
+The default hyperparameter grid for decision trees was used.
+```{r}
+set.seed(seed)
+dt_mod_tune <- train(formula, 
+                     data = train
+                     , trControl = train_control
+                     , method = "rpart"
+                     , tuneLength = 10
+                     , metric = "ROC")
+```
+
+
+## Evaluation
+The estimated standard error of the ROC metric at the bestTune (**avcvse**) was lower than the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**).
+
+Further hyperparameter tuning has the potential to yield improvements in model performance that exceed what would be expected from noise at the bestTune.
+```{r}
+model <- dt_mod_tune
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC at bestTune:", avcvse, "\n")
+cat("SD of ROC across tuning configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Inspection
+Average ROC values across the range of tuning configurations were displayed.
+```{r}
+model <- dt_mod_tune
+
+model$finalModel %>% rpart.plot()
+model$finalModel %>% prp()
+
+model %>% plot()
+
+cp_new <- 0.005
+
+model$results %>% ggplot(aes(x = cp, y = ROC)) +
+  geom_point(color = "steelblue", size = 3, alpha = 0.02) +
+  geom_rect(aes(xmin = 0, xmax = cp_new, ymin = -Inf, ymax = Inf),
+            fill = "seashell4", alpha = 0.02, inherit.aes = FALSE) +
+  geom_line(color = "steelblue") +
+  labs(title = "Decision Tree: Average AUC by Complexity Parameter (cp)",
+       x = "Complexity Parameter (cp)",
+       y = "Average Area under the Curve (AUC)") +
+  theme_minimal()
+```
+
+
+## Tuned Grid
+Complexity parameter (see above) and maxdepth (see below) were tuned.
+```{r}
+cat(paste("Consider adjusting cp to less than", cp_new))
+
+maxdepth <- max(rpart:::tree.depth(as.numeric(row.names(dt_mod_tune$finalModel$frame))))
+depths <- 1:maxdepth
+results <- NULL
+tree.list <- vector("list", length(depths))
+```
+
+
+## Retraining
+The model was retrained based on the new grid, where different maxdepth values were explored. 
+
+The new cp value range was applied.
+```{r, warning = FALSE, message = FALSE}
+
+cat(paste("Train and compare all maxdepth values"))
+
+for (i in seq_along(depths)) {
+  set.seed(seed)
+  model <- train(
+    formula,
+    data = train,
+    trControl = train_control,
+    method = "rpart",
+    tuneLength = 10,
+    tuneGrid = expand.grid(cp = seq(0, cp_new, length.out = 10)),
+    control = rpart.control(maxdepth = depths[i])  )
+  tree.list[[i]] <- model
+  tempresults <- model$results
+  tempresults$depth <- depths[i]
+  results <- rbind(results, tempresults)}
+
+best_results <- do.call(rbind, lapply(split(results, results$depth), function(df) {
+  df[which.max(df$ROC), c("ROC", "depth", "cp")]}))
+best_results
+
+cat("The maxdepth of 8 was best-performing.")
+
+dt_mod <- tree.list[[8]]
+```
+
+
+## Evaluation
+The new grid was not able to reduce the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**) to below the estimated standard error of the ROC metric at the bestTune (**avcvse**).
+
+However, any reduction in maxdepth below 8 will reduce ROC more than the standard error of the ROC in the bestTune (**avcvse**). 
+
+So, no further tuning is necessary.
+```{r}
+model <- dt_mod
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC at bestTune:", avcvse, "\n")
+cat("SD of ROC across tuning configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Summary
+```{r}
+model <- dt_mod
+
+varImp(model)
+vip(model)
+```
+
+
+## Final Trees
+The new trees are displayed.
+```{r}
+dt_mod$finalModel %>% rpart.plot()
+dt_mod$finalModel %>% prp()
+```
+
+
+## Predictions
+Accuracy of the decision trees model (**dt_mod**).
+```{r}
+model <- dt_mod
+probs <- predict(model, newdata = train, type = "prob")
+
+preds <- probs[, "Demented"]
+class <- factor(ifelse(preds < 0.5, "Nondemented", "Demented"))
+class %>% table()
+confusion <- confusionMatrix(class, train$dia, positive = "Demented")
+confusion %>% print()
+```
+
+
+# Random Forests
+
+
+## Training
+Initialised some hyperparameters to test the full range of mtry values.
+```{r}
+set.seed(seed)
+rf_mod_tune <- train(
+  formula,
+  data = train,
+  method = "ranger",
+  trControl = train_control,
+  metric = "ROC",
+  tuneGrid = expand.grid(
+    mtry = seq(1, ncol(train) - 1),
+    splitrule = "gini",
+    min.node.size = 1),
+  importance = "impurity")
+```
+
+
+## Evaluation
+The estimated standard error of the ROC metric at the bestTune (**avcvse**) was lower than the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**).
+
+Further hyperparameter tuning has the potential to yield improvements in model performance that exceed what would be expected from noise at the bestTune.s
+```{r}
+model <- rf_mod_tune
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC at bestTune:", avcvse, "\n")
+cat("SD of ROC across tuning configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Inspection
+Average ROC values across the range of tuning configurations were displayed.
+```{r}
+model <- rf_mod_tune
+model %>% plot()
+
+mtry_new <- round(sqrt(ncol(train) - 1))
+
+model$results %>%
+  ggplot(aes(x = mtry, y = ROC, color = as.factor(min.node.size), group = as.factor(min.node.size))) +
+  geom_rect(aes(xmin = 1, xmax = mtry_new, ymin = -Inf, ymax = Inf),
+            fill = "seashell4", alpha = 0.02, inherit.aes = FALSE) +
+  geom_point(size = 3, alpha = 0.5) +
+  geom_line() +
+  labs(title = "Random Forest: Average AUC by mtry and min.node.size",
+       x = "Number of predictors randomly sampled",
+       y = "Average AUC") + theme_minimal()
+```
+
+
+## Tuned Grid
+Tree depths were tuned to the square root of the number of predictors, a common practice for random forests in classification tasks (Ramadhan et al., 2017).
+```{r}
+cat(paste("Consider adjusting mtry to less than or equals to", round(sqrt(ncol(train) - 1)), "."))
+
+mtry_new <- round(sqrt(ncol(train) - 1))
+
+grid_rf <- expand.grid(mtry = 1:mtry_new, 
+                       splitrule = "gini",
+                       min.node.size = 1)
+```
+
+
+## Retraining
+The model was retrained based on the new grid.
+```{r}
+set.seed(seed)
+rf_mod <- train(formula,
+                     data = train,
+                     method = "ranger",
+                     trControl = train_control,
+                     metric = "ROC",
+                     tuneGrid = grid_rf,
+                     importance = "impurity")
+```
+
+
+## Evaluation
+The new grid was not able to reduce the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**) to below the estimated standard error of the ROC metric at the bestTune (**avcvse**).
+```{r}
+model <- rf_mod
+
+avcvse <- model$results[row.names(model$bestTune), "ROCSD"] / (train_control$number * train_control$repeats)
+sdrocchange <- sd(model$results$ROC, na.rm = TRUE)
+
+cat("SE of ROC at bestTune:", avcvse, "\n")
+cat("SD of ROC across tuning configurations", sdrocchange, "\n")
+
+print(ifelse(avcvse > sdrocchange, "Does not need tuning", "Needs tuning"))
+```
+
+
+## Stop tuning?
+The estimated standard error of the ROC metric at the bestTune (**avcvse**) remained lower than the standard deviation of the ROC metric across all tuning configurations (**sdrocchange**).
+
+However, the selection of mtry values was by convention (Ramadhan et al., 2017), not for maximising performance. The model also had good and improved accuracy.
+
+
+## Summary
+```{r}
+model <- rf_mod
+
+summary(model)
+varImp(model)
+vip(model)  # age, soc, and alc.Have.Alcohol have appreciable importance.
+```
+
+
+## Predictions
+Accuracy of the random forest model (**rf_mod**).
+```{r}
+model <- rf_mod
+probs <- predict(model, newdata = train, type = "prob")
+
+preds <- probs[, "Demented"]
+class <- factor(ifelse(preds < 0.5, "Nondemented", "Demented"))
+class %>% table()
+confusion <- confusionMatrix(class, train$dia, positive = "Demented")
+confusion %>% print()
+```
+
+
+# Save
+```{r}
+save(train, test, file = "splits.RData")
+save(seed, packages, functions,file = "packages.RData")
+save(train_control, formula, group, seed, file = "model_objects.RData")
+save(reg_mod_tune, dt_mod_tune, rf_mod_tune, file = "tuning_models.RData")
+save(log_mod, reg_mod, dt_mod, rf_mod, file = "trained_models.RData")
+```
+
+
+# Load
+```{r, warning = FALSE, message = FALSE}
+rm(list = ls(all.names = TRUE))
+cat("\014")
+
+load("splits.RData")
+load("packages.RData")
+load("model_objects.RData")
+load("tuning_models.RData")
+load("trained_models.RData") 
+
+invisible(lapply(packages, function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+  library(p, character.only = TRUE)}))
+
+invisible(lapply(names(functions), function(f) conflict_prefer(f, functions[f])))
+```
+
+
+# Performance
+
+
+## Models
+Categories of models were defined.
+```{r}
+allmodels <- list(Logistic = log_mod
+                  , Regularised = reg_mod
+                  , RandomForest = rf_mod
+                  , DecisionTrees = dt_mod)
+
+linmodels <- list(Logistic = log_mod
+                  , Regularised = reg_mod)
+
+nonlinmodels <- list(RandomForest = rf_mod
+                  , DecisionTrees = dt_mod)
+```
+
+
+## Test
+Evaluation of each model was conducted on the test split. 
+
+AUC values were computed with the roc() function, and DeLong p-values were computed with the roc.test() function, both from the **pROC** package (Robin et al., 2021). 
+```{r}
+models <- allmodels
+
+point_results <- data.frame(
+  Model = character(0),
+  AUC = numeric(0),
+  Sensitivity = numeric(0),
+  Specificity = numeric(0),
+  DeLong_p_value = numeric(0),
+  stringsAsFactors = FALSE)
+
+ref_model <- models[[1]]
+ref_pred_probs <- predict(ref_model, newdata = test, type = "prob")[["Demented"]]
+true_labels <- factor(test$dia, levels = c("Nondemented", "Demented"))
+ref_roc <- roc(
+  response = true_labels,
+  predictor = ref_pred_probs,
+  levels = c("Nondemented", "Demented"),
+  direction = "<")
+
+for (j in seq_along(models)) {
+  model <- models[[j]]
+  model_name <- names(models)[j]
+  pred_probs <- predict(model, newdata = test, type = "prob")[["Demented"]]
+  model_roc <- roc(
+    response = true_labels,
+    predictor = pred_probs,
+    levels = c("Nondemented", "Demented"),
+    direction = "<")
+
+  auc_val <- as.numeric(auc(model_roc))
+  best_coords <- coords(model_roc, "best", best.method = "youden")
+  sensitivity_val <- as.numeric(best_coords[["sensitivity"]])
+  specificity_val <- as.numeric(best_coords[["specificity"]])
+  delong_p <- if (j == 1) NA else roc.test(ref_roc, model_roc, method = "delong")$p.value
+
+  point_results <- rbind(
+    point_results,
+    data.frame(
+      Model = model_name,
+      AUC = round(auc_val, 3),
+      Sensitivity = round(sensitivity_val, 3),
+      Specificity = round(specificity_val, 3),
+      DeLong_p_value = ifelse(is.na(delong_p), NA, signif(delong_p, 3)),
+      stringsAsFactors = FALSE))}
+```
+
+
+## Evaluation
+The regularised regression model (**reg_mod**), and random forest model **rf_mod**) did not differ significantly in performance from the logistic model (**log_mod**), which was set as the reference model. 
+
+The decision trees model (**dt_mod**), had significantly poorer performance.
+
+```{r}
+point_results %>% paged_table()
+```
+
+
+## Plot
+The AUC curve was plotted.
+```{r}
+models <- allmodels
+roc_list <- list()
+
+true_labels <- factor(test$dia, levels = c("Nondemented", "Demented"))
+
+for (j in seq_along(models)) {
+  model <- models[[j]]
+  model_name <- names(models)[j]
+  
+  pred_probs <- predict(model, newdata = test, type = "prob")[["Demented"]]
+  
+  roc_obj <- roc(
+    response = true_labels,
+    predictor = pred_probs,
+    levels = c("Nondemented", "Demented"),
+    direction = "<")
+  
+  roc_list[[model_name]] <- roc_obj}
+
+pROC::ggroc(roc_list, aes = c("color"), size = 1, legacy.axes = TRUE) +
+  geom_abline(
+    intercept = 0, slope = 1,
+    linetype = "dashed", color = "gray", size = 1) +
+  theme_minimal() +
+  labs(
+    title = "ROC Curves for Models",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model",
+    linetype = "Model")
+```
+
+
+## Bootstrap
+Performance metrics across bootstrapped resamples (n = 1000) of the test split were computed.
+```{r}
+models <- allmodels
+
+set.seed(seed)
+
+bootstrap_results <- lapply(names(models), function(x) {
+  data.frame(iteration = integer(),
+             auc = numeric(),
+             sensitivity = numeric(),
+             specificity = numeric())})
+
+names(bootstrap_results) <- names(models)
+
+num_bootstraps <- 1000
+test_size <- nrow(test)
+
+for (iter in 1:num_bootstraps) {
+  sample_indices <- sample(1:test_size, size = test_size, replace = TRUE)
+  bootstrap_sample <- test[sample_indices, ]
+  true_labels <- factor(bootstrap_sample$dia, levels = c("Nondemented", "Demented"))
+  
+  for (mdl_name in names(models)) {
+    current_model <- models[[mdl_name]]
+    predicted_probs <- predict(current_model, newdata = bootstrap_sample, type = "prob")
+    
+    if (is.data.frame(predicted_probs) || is.matrix(predicted_probs)) {
+      predicted_probs <- predicted_probs[, "Demented"]}
+    
+    suppressMessages({
+      roc_object <- roc(true_labels, predicted_probs, levels = c("Nondemented", "Demented"))})
+    
+    auc_value <- auc(roc_object)
+    threshold_info <- coords(
+      roc_object, "best", best.method = "youden",
+      ret = c("threshold", "sensitivity", "specificity"))
+    
+    bootstrap_results[[mdl_name]] <- rbind(
+      bootstrap_results[[mdl_name]],
+      data.frame(
+        iteration = iter,
+        auc = as.numeric(auc_value),
+        sensitivity = threshold_info["sensitivity"],
+        specificity = threshold_info["specificity"]))}}
+
+calculate_summary <- function(metric_values) {
+  mean_val <- mean(metric_values, na.rm = TRUE)
+  ci_bounds <- quantile(metric_values, probs = c(0.025, 0.975), na.rm = TRUE)
+  
+  c(
+    mean = mean_val,
+    ci_lower = as.numeric(ci_bounds[1]),
+    ci_upper = as.numeric(ci_bounds[2]))}
+
+performance_summary <- data.frame(
+  model = character(),
+  metric = character(),
+  mean = numeric(),
+  ci_lower = numeric(),
+  ci_upper = numeric(),
+  stringsAsFactors = FALSE)
+
+for (mdl_name in names(bootstrap_results)) {
+  df <- bootstrap_results[[mdl_name]]
+  
+  auc_summary <- calculate_summary(df$auc)
+  sensitivity_summary <- calculate_summary(df$sensitivity)
+  specificity_summary <- calculate_summary(df$specificity)
+  
+  performance_summary <- rbind(
+    performance_summary,
+    data.frame(
+      model = mdl_name,
+      metric = "AUC",
+      mean = auc_summary["mean"],
+      ci_lower = auc_summary["ci_lower"],
+      ci_upper = auc_summary["ci_upper"]),
+    data.frame(
+      model = mdl_name,
+      metric = "Sensitivity",
+      mean = sensitivity_summary["mean"],
+      ci_lower = sensitivity_summary["ci_lower"],
+      ci_upper = sensitivity_summary["ci_upper"]),
+    data.frame(
+      model = mdl_name,
+      metric = "Specificity",
+      mean = specificity_summary["mean"],
+      ci_lower = specificity_summary["ci_lower"],
+      ci_upper = specificity_summary["ci_upper"]))}
+```
+
+
+## Evaluation
+Bootstrap p-values were calculated. 
+
+The regularised regression (**reg_mod**), decision trees (**dt_mod**), and random forest (**rf_mod**) models did not differ significantly in performance from the baseline logistic model (**log_mod**). 
+```{r, warning = FALSE}
+performance_summary %>% paged_table()
+
+baseline_model <- "Logistic"
+
+for (mdl_name in names(models)) {
+  if (mdl_name == baseline_model) next
+  
+  auc_diff <- bootstrap_results[[mdl_name]]$auc - bootstrap_results[[baseline_model]]$auc
+  
+  bootstrap_p_value <- 2 * min(mean(auc_diff > 0), mean(auc_diff < 0))
+  
+  cat(sprintf("Comparing %s vs %s: %f\n", mdl_name, baseline_model, bootstrap_p_value))}
+```
+
+
+## Plot
+The mean AUC curve across bootstrap resamples is plotted here, along with confidence intervals.
+```{r, warning = FALSE, messsage = FALSE}
+models <- allmodels
+specificity_grid <- seq(0, 1, length.out = 100)
+roc_interpolated_list <- list()
+ci_data_list <- list()
+
+for (mdl_name in names(models)) {
+  mdl <- models[[mdl_name]]
+
+  prob_predictions <- predict(mdl, newdata = test, type = "prob")
+  if (is.data.frame(prob_predictions) || is.matrix(prob_predictions)) {
+    prob_predictions <- prob_predictions[, "Demented"]}
+
+  true_classes <- factor(test$dia, levels = c("Nondemented", "Demented"))
+  
+  roc_curve <- roc(true_classes, prob_predictions, levels = c("Nondemented", "Demented"))
+  
+  interpolated_sens <- approx(
+    x = rev(roc_curve$specificities),
+    y = rev(roc_curve$sensitivities),
+    xout = specificity_grid)$y
+
+  ci_sens <- ci.se(roc_curve, specificities = specificity_grid, boot.n = 1000, conf.level = 0.95)
+
+  roc_df <- data.frame(
+    model = mdl_name,
+    specificity = specificity_grid,
+    sensitivity = interpolated_sens,
+    lower = ci_sens[, 1],
+    upper = ci_sens[, 3])
+  
+  roc_interpolated_list[[mdl_name]] <- roc_df}
+
+roc_plot_data <- bind_rows(roc_interpolated_list)
+
+ggplot(roc_plot_data, aes(x = 1 - specificity, y = sensitivity, color = model, fill = model)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.06, color = NA) +
+  geom_line(size = 1.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  labs(
+    title = "ROC Curves with 95% Confidence Intervals",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = "Model",
+    fill = "Model") +
+  theme_minimal()
+```
+
+
+# Interpretation
+
+
+## Importance
+Variable importance was calculated using the varImp() function from the **caret** package (Kuhn, 2008). 
+```{r}
+vi_dfs <- lapply(names(allmodels), function(name) {
+  imp <- varImp(allmodels[[name]])
+  df <- imp$importance
+  if (is.data.frame(df)) {
+    df$variable <- rownames(df)
+    df$model <- name
+    df} else {
+    data.frame(variable = names(df), Importance = as.vector(df), model = name)}})
+
+all_vi <- bind_rows(vi_dfs)
+
+importance_cols <- grep("Overall|Nondemented|Demented", names(all_vi), value = TRUE)
+
+all_vi_long <- all_vi %>%
+  pivot_longer(
+    cols = all_of(importance_cols),
+    names_to = "importance_type",
+    values_to = "Importance") %>%
+  dplyr::filter(!is.na(Importance)) %>%
+  select(-importance_type) %>%
+  distinct()
+
+mean_importance <- all_vi_long %>%
+  group_by(variable) %>%
+  summarise(mean_Importance = mean(Importance)) %>%
+  arrange(desc(mean_Importance))
+
+all_vi_long$variable <- factor(all_vi_long$variable, levels = mean_importance$variable)
+
+vi_plot <- ggplot(all_vi_long, aes(x = variable, y = Importance, fill = model)) +
+  geom_col(position = position_dodge()) +
+  coord_flip() +
+  labs(x = "Variable", y = "Importance") +
+  theme_bw() +
+  theme(legend.position = "right")
+
+print(vi_plot)
+```
+
+
+## Shapley
+Shapley values were calculated using the explain() function from the **fastshap** package (Yang, 2021). 
+
+Shapley values represent the contribution of each predictor in a model to the difference between the predicted value for across observations and the average prediction across the dataset (Shapley, 1953). 
+```{r}
+models <- allmodels
+set.seed(seed)
+
+shap_vals_list <- list()
+test_nodia_list <- list()
+paged_tables_list <- list()
+
+for (mod_name in names(models)) {
+  mod <- models[[mod_name]]
+  test_nodia <- test %>% dplyr::select(-dia)
+  test_nodia_list[[mod_name]] <- test_nodia
+
+  pred_wrapper <- function(object, newdata) {
+    predict(object, newdata = newdata, type = "prob")[, "Demented"]}
+
+  shap_vals <- fastshap::explain(mod, X = test_nodia, pred_wrapper = pred_wrapper, nsim = 100)
+  shap_vals_list[[mod_name]] <- shap_vals
+
+  feature_stats <- tibble(
+    Feature = colnames(shap_vals),
+    MeanAbs = colMeans(abs(shap_vals)),
+    MedianAbs = apply(abs(shap_vals), 2, median),
+    SD = apply(shap_vals, 2, sd),
+    Min = apply(shap_vals, 2, min),
+    Max = apply(shap_vals, 2, max)) %>% arrange(desc(MeanAbs))
+
+  paged_tables_list[[mod_name]] <- paged_table(feature_stats)}
+
+for (model_name in names(models)) {
+  print(paged_tables_list[[model_name]])}
+```
+
+
+## Bee Swarm Plot
+This visualises the Shapley values for each observation in the test split, and the contribution of each predictor to the difference between their own predicted value and the average prediction across the dataset. The mean absolute Shapley value for a predictor across observations represents the average magnitude of that predictor's contribution to the model's overall predictions and is a measure of local variable importance (Henninger & Strobl, 2025).
+
+The Bee Swarm Plot was visualised with shapviz() and sv_importance from the **shapviz** package (Mayer, 2025).
+```{r}
+for (mod_name in names(shap_vals_list)) {
+  shap_vals <- shap_vals_list[[mod_name]]
+  test_nodia <- test_nodia_list[[mod_name]]
+
+  shp <- shapviz(shap_vals, test_nodia)
+
+  p_beeswarm <- sv_importance(
+    shp,
+    kind = "beeswarm",
+    max_display = 15,
+    bee_width = 0.25,
+    bee_adjust = 0.0001,
+    color_bar_title = "Feature value",
+    viridis_args = list(option = "C", begin = 0.3, end = 0.9),
+    show_numbers = TRUE,
+    number_size = 3.5,
+    sort_features = TRUE,
+    alpha = 0.6) +
+    theme_minimal(base_size = 14) +
+    labs(
+      title = paste("Shapley Bee Swarm Plot -", mod_name),
+      x = "Shapley value",
+      y = "Feature") +
+    theme(
+      plot.title = element_text(face = "bold"),
+      legend.position = "right")
+
+  mean_abs_shap <- colMeans(abs(shap_vals))
+
+  df_shap <- data.frame(
+    Feature = names(mean_abs_shap),
+    MeanAbsShap = mean_abs_shap) %>%
+    arrange(desc(MeanAbsShap)) %>%
+    slice_head(n = 15)
+
+  p_mean_abs <- ggplot(
+    df_shap,
+    aes(x = reorder(Feature, MeanAbsShap), y = MeanAbsShap)) +
+    geom_col(fill = "violetred", width = 0.5) +
+    coord_flip() +
+    theme_minimal(base_size = 14) +
+    labs(
+      title = paste("Mean Absolute Shapley Values -", mod_name),
+      x = "Feature",
+      y = "Mean |Shapley value|") +
+    theme(plot.title = element_text(face = "bold"))
+
+  grid.arrange(p_beeswarm, p_mean_abs, ncol = 2, widths = c(10, 10))}
+```
+
+
+# Predictions
+
+
+## Values
+Probability of dementia classification, and classification outcomes were tallied up.
+```{r}
+models <- list(
+  Logistic = allmodels$Logistic,
+  Regularised = allmodels$Regularised,
+  DecisionTrees = allmodels$DecisionTrees,
+  RandomForest = allmodels$RandomForest)
+
+dem <- "Demented"
+
+all_preds <- lapply(names(models), function(mod) {
+  preds <- predict(models[[mod]], newdata = test, type = "prob")
+  prob <- if (is.data.frame(preds) || is.matrix(preds)) preds[, dem] else preds
+  
+  data.frame(
+    test,
+    Probability = prob,
+    Model = mod,
+    Classification = ifelse(prob >= 0.5, "Demented", "Non-Demented"))})
+
+preds <- do.call(rbind, all_preds)
+preds %>% paged_table()
+```
+
+
+## Probabilities
+
+Partial dependence was calculated with partial() from the **pdp** package (Greenwell, 2017). It was used to generate the partial dependence of dementia probability on the relevant predictor variables, allowing comparison of these effects across models and alcohol use groups.
+
+The moderating effects of alcohol consumption (**alc.Have.Alcohol**) on the relationships between age (**age**) and social engagement (**soc**) and the predicted probability of dementia (**dia**) were examined visually. 
+```{r}
+models <- nonlinmodels
+
+make_pdp_plot <- function(var_name, var_label, data, models, alc_var = "alc.Have.Alcohol") {
+  var_vals <- seq(min(data[[var_name]]), max(data[[var_name]]), length.out = 100)
+  alc_vals <- unique(data[[alc_var]])
+  pred_grid <- expand.grid(setNames(list(var_vals, alc_vals), c(var_name, alc_var)))
+  
+  pdp_list <- lapply(names(models), function(mod_name) {
+    mod <- models[[mod_name]]
+    pd <- partial(mod,
+                  pred.var = c(var_name, alc_var),
+                  pred.grid = pred_grid,
+                  train = data,
+                  prob = TRUE,
+                  which.class = "Demented",
+                  grid.resolution = NULL,
+                  progress = "text")
+    pd$Model <- mod_name
+    pd})
+  
+  pdp_df <- do.call(rbind, pdp_list)
+  
+  p <- ggplot(pdp_df, aes_string(x = var_name, y = "yhat", color = paste0("factor(", alc_var, ")"))) +
+    geom_line() +
+    facet_wrap(~ Model) +
+    labs(title = paste("2D Partial Dependence:", var_label, "and Alcohol"),
+         x = var_label,
+         y = "Predicted Probability of Dementia",
+         color = "Alcohol Use") +
+    theme_minimal()
+  
+  print(p)
+  invisible(pdp_df)}
+
+pdp_age_df <- make_pdp_plot("age", "Age", test, models)
+pdp_soc_df <- make_pdp_plot("soc", "Social Engagement", test, models)
+```
+
+
+# Interactions
+## Pairs
+The hypothesised interaction pairs were specified.
+```{r}
+interactionpairs <- list(c("age", "alc.Have.Alcohol")
+                       , c("soc", "alc.Have.Alcohol"))
+```
+
+
+## Interaction Strength
+H-statistics were calculated using the hstats() function from the **hstats** package (Mayer, 2019).
+
+H-statistics quantify the strength of the interaction between predictors by measuring the extent to which the combined effect of two variables on the predicted outcome deviates from the sum of their individual effects. 
+```{r}
+set.seed(seed) # This chunk has random operations.
+
+vars_for_h <- setdiff(names(train)[sapply(train, is.numeric)], group)
+
+pred <- function(object, newdata) {
+  predict(object, newdata, type = "prob")[, 2]}
+
+pred_funs <- setNames(rep(list(pred), length(nonlinmodels)), names(nonlinmodels))
+
+compute_hstats <- function(model, data, variables, pred_fun) {
+  hstats_result <- hstats(model, X = data[, variables, drop = FALSE], pred_fun = pred_fun, approx = TRUE, n_max = 500)
+  return(hstats_result)}
+
+hstats_results <- mapply(
+  FUN = compute_hstats,
+  model = nonlinmodels,
+  pred_fun = pred_funs,
+  MoreArgs = list(data = train, variables = vars_for_h), # h-statistics is based on train data
+  SIMPLIFY = FALSE)
+
+for (model_name in names(hstats_results)) {
+  p <- plot(
+    hstats_results[[model_name]],
+    sort = TRUE,
+    top_m = 15,
+    rotate_x = TRUE,
+    fill = "seashell4",
+    viridis_args = list(option = "magma"),
+    facet_scales = "free",
+    ncol = 1) + 
+    theme_minimal() +
+    ggtitle(paste("H-Statistic Plot -", model_name))
+  print(p)}
+```
+
+
+## Shapley Dependence
+Dependence plots based on Shapley values were generated to interpret the nature of these interaction effects.
+```{r}
+set.seed(seed)
+
+some_vals_list <- shap_vals_list[names(shap_vals_list) %in% names(nonlinmodels)]
+
+for (mod_name in names(some_vals_list)) {
+  shap_vals <- some_vals_list[[mod_name]]
+  test_nodia <- test_nodia_list[[mod_name]]
+  shp <- shapviz(shap_vals, test_nodia)
+  
+  for (pair in interactionpairs) {
+    p <- sv_dependence(shp, v = pair[1], color_var = pair[2], alpha = 0) +
+      geom_point(size = 3, alpha = 0.5, position = position_jitter(width = 1, height = 0)) +
+      
+      geom_hline(yintercept = 0, linetype = "dotted", color = "maroon") +
+      ggtitle(paste("SHAP Dependence Plot", mod_name, ":", pair[1], "vs", pair[2])) +
+      theme_minimal() +
+      theme(plot.title = element_text(face = "bold"))
+    print(p)}}
+```
+
+
+# References
+
+Aw, T. B. H., Leow, Y. J., & Kandiah, N. (2025). Association of Plasma p-tau181 and Cognition in Nondemented Subjects Without Aβ42/40 Positivity. *The American Journal of Geriatric Psychiatry, S1064-7481*(25)00392-6. Advance online publication. https://doi.org/10.1016/j.jagp.2025.06.017
+
+Greenwell BM (2017). "pdp: An R Package for Constructing Partial Dependence Plots." *The R Journal, 9*(1), 421–436. doi:10.32614/RJ-2017-016, https://doi.org/10.32614/RJ-2017-016.
+
+Harrell Jr, F. E., & Harrell Jr, M. F. E. (2019). *Package ‘hmisc’.* CRAN2018, 2019, 235-236. [R package].
+
+Henninger, M., & Strobl, C. (2025). Interpreting machine learning predictions with LIME and Shapley values: theoretical insights, challenges, and meaningful interpretations. *Behaviormetrika, 52*(1), 45–75.
+
+Hothorn, T., Zeileis, A., Farebrother, R. W., Cummins, C., Millo, G., Mitchell, D., & Zeileis, M. A. (2015). *Package ‘lmtest’.* Testing linear regression models, 6.
+
+Kim, S., Spilman, S. L., Liao, D. H., Sacco, P., & Moore, A. A. (2018). Social networks and alcohol use among older adults: a comparison with middle-aged adults. *Aging & Mental Health, 22*(4), 550-557.
+
+Kassambara A (2023). *rstatix: Pipe-Friendly Framework for Basic Statistical Tests*. R package version 0.7.2.
+
+Kuhn, M. (2008). Building predictive models in R using the caret package. *Journal of Statistical Software, 28*, 1–26. https://doi.org/10.18637/jss.v028.i05
+
+Mayer, M., & Mayer, M. M. (2019). *Package ‘missRanger’* [R package].
+
+Mayer, M. (2025). *hstats: Interaction Statistics (Version 1.2.2)* [R package].
+
+Mayer, M. (2025). *shapviz: SHAP Visualizations (R package version 0.10.3)*.
+
+Pearl, J. (2014). Interpretation and identification of causal mediation. *Psychol Methods, 19*(4), 
+459-481. https://doi.org/10.1037/a0036434 
+
+Ramadhan, M. M., Sitanggang, I. S., Nasution, F. R., & Ghifari, A. (2017). Parameter tuning in random forest based on grid search method for gender classification based on voice frequency. *DEStech transactions on computer science and engineering, 10*(2017).
+
+Rehm, J., Hasan, O. S., Black, S. E., Shield, K. D., & Schwarzinger, M. (2019). Alcohol use and dementia: a systematic scoping review. *Alzheimer's research & therapy, 11*(1), 1.
+
+Robin, X., Turck, N., Hainard, A., Tiberti, N., Lisacek, F., Sanchez, J. C., ... & Robin, M. X. (2023). *Package ‘pROC’*.
+
+Shapley, L. S. (1953). *A value for n-person games*.
+
+Yang, J. (2021). *Fast TreeSHAP: Accelerating SHAP Value Computation for Trees*. [R package]. https://doi.org/10.48550/arXiv.2109.09847
+
+Wickham H (2024). *conflicted: An Alternative Conflict Resolution Strategy*. R package version 1.2.0.
+
+Wickham H, Bryan J (2025). *readxl: Read Excel Files*. R package version 1.4.5.
+
+# Information
+This project was conducted in fulfilment of the course *PL4245 Data Science in Psychology* in Academic Year 2025/2026, Semester 1, at the National University of Singapore (NUS).
+
+# Load
+```{r}
+save.image(file = "environment.RData")
+load("environment.RData")
+
+invisible(lapply(
+  packages,
+  \(p) {
+    if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+    library(p, character.only = TRUE)}))
+
+invisible(lapply(names(functions), function(f) conflict_prefer(f, functions[f])))
+```
+
